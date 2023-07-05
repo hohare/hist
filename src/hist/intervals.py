@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     )
     raise
 
-__all__ = ("poisson_interval", "clopper_pearson_interval", "ratio_uncertainty")
+__all__ = ("poisson_interval", "clopper_pearson_interval", "lancaster_midp", "lancaster_midp_interval", "ratio_uncertainty")
 
 
 def __dir__() -> tuple[str, ...]:
@@ -112,10 +112,81 @@ def clopper_pearson_interval(
     return interval  # type: ignore[no-any-return]
 
 
+def lancaster_midp(
+    passed: np.typing.NDArray[Any],
+    total: np.typing.NDArray[Any],
+    coverage: float | None = None,
+) -> np.typing.NDArray[Any]:
+    r"""
+    Compute the Lancaster mid-P coverage interval for a binomial distribution.
+    It is based on the ROOT TEfficiency::MidPInterval function:
+    <https://root.cern.ch/doc/master/classTEfficiency.html#a7bb1249f9bf38906d61e461a5fb56ec7>
+    which is based on <http://arxiv.org/abs/0905.3831>
+    
+    Args:
+        passed: Numerator or number of successes.
+        total: Denominator or number of trials.
+        coverage: Central coverage interval.
+    
+    Returns:
+        The Lancaster mid-P coverage interval.
+    """
+    alpha = 1. - coverage
+    alpha_min = alpha/2. #is for equal_tailed
+    tol = 1e-9
+    pmin=0
+    pmax=1
+    if (passed>0) and (passed<1):
+        p0 = MidPInterval_single(total, 0.0, bUpper, coverage)
+        p1 = MidPInterval_single(total, 1.0, bUpper, coverage)
+        p = (p1 - p0)*passed + p0
+        return p
+    
+    while (abs(pmax-pmin)>tol):
+        p = (pmin+pmax)/2.
+        v = 0.5*beta.pdf(p, passed+1., total-passed+1.)/(total+1)
+        if (passed-1>=0):
+            v += beta.sf(p, passed, total-passed+1);
+
+        if bUpper: vmin = alpha_min
+        else: vmin = 1. - alpha_min
+        
+        if v>vmin: pmin = p
+        else: pmax = p
+    return p
+
+def lancaster_midp_interval(
+    num: np.typing.NDArray[Any],
+    denom: np.typing.NDArray[Any],
+    coverage: float | None = None,
+) -> np.typing.NDArray[Any]:
+    """
+    Compute the Lancaster mid-P coverage interval for a binomial distribution array.
+    
+    Args:
+        num: Numerator or number of successes.
+        denom: Denominator or number of trials.
+        coverage: Central coverage interval
+          Default is one standard deviation
+    
+    Returns:
+        The Lancaster mid-P coverage interval, upper and lower.
+    """
+    if coverage is None:
+        coverage = stats.norm.cdf(1) - stats.norm.cdf(-1)
+    upperlimit = []
+    lowerlimit = []
+    for i in range(len(total)):
+        lowerlimit.append(lancaster_midp(passed[i], total[i], False, coverage))
+        upperlimit.append(lancaster_midp(passed[i], total[i], True, coverage))
+        
+    return np.array([lowerlimit, upperlimit])
+      
+
 def ratio_uncertainty(
     num: np.typing.NDArray[Any],
     denom: np.typing.NDArray[Any],
-    uncertainty_type: Literal["poisson", "poisson-ratio", "efficiency"] = "poisson",
+    uncertainty_type: Literal["poisson", "poisson-ratio", "poisson-midP", "efficiency"] = "poisson",
 ) -> Any:
     r"""
     Calculate the uncertainties for the values of the ratio ``num/denom`` using
@@ -135,6 +206,12 @@ def ratio_uncertainty(
            two independent Poisson distributions.
            It over-covers to a similar degree as the Clopper-Pearson interval
            does for the Binomial efficiency parameter estimate.
+         * ``"poisson-midP"`` implements a Lancaster mid-P confidence interval 
+           for the ratio ``num / denom`` assuming it is an estimator of the ratio
+           of expected rates from two independent Poisson distributions. It is 
+           not an exact method.
+           It over-covers to a lesser degree than the Clopper-Pearson interval
+           with occasional slight under-coverage.
          * ``"efficiency"`` implements the Clopper-Pearson confidence interval
            for the ratio ``num / denom`` assuming it is an estimator of a Binomial
            efficiency parameter.
@@ -155,6 +232,11 @@ def ratio_uncertainty(
     elif uncertainty_type == "poisson-ratio":
         # Details: see https://github.com/scikit-hep/hist/issues/279
         p_lim = clopper_pearson_interval(num, num + denom)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r_lim: np.typing.NDArray[Any] = p_lim / (1 - p_lim)
+            ratio_uncert = np.abs(r_lim - ratio)
+    elif uncertainty_type == "poisson-midP":
+        p_lim = lancaster_midp_interval(num, num+denom)
         with np.errstate(divide="ignore", invalid="ignore"):
             r_lim: np.typing.NDArray[Any] = p_lim / (1 - p_lim)
             ratio_uncert = np.abs(r_lim - ratio)
